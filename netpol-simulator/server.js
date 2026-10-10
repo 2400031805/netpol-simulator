@@ -1,9 +1,15 @@
 const express = require("express");
 const path = require("path");
+const fs = require("fs");
 const app = express();
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+
+// Serve from "public" if it exists (local setup), otherwise from the repo root (GitHub layout)
+const publicDir = fs.existsSync(path.join(__dirname, "public"))
+  ? path.join(__dirname, "public")
+  : __dirname;
+app.use(express.static(publicDir));
 
 function isAllowed(policies, src, dst) {
   const { denyAll, fb, bd } = policies;
