@@ -1,235 +1,327 @@
-const $ = id => document.getElementById(id);
+
+const $ = (id) => document.getElementById(id);
+
 const NS = "network-policy-lab";
 
-function pol(){
-  return { denyAll:$("denyAll").checked, fb:$("fb").checked, bd:$("bd").checked, ob:$("ob").checked };
-}
+const PAIRS = [
+  ["frontend", "backend"],
+  ["frontend", "database"],
+  ["backend", "database"],
+  ["test-client", "backend"],
+  ["test-client", "database"],
+  ["outsider", "backend"]
+];
 
-// Same rules as NetworkPolicy: a pod is open until selected; then only allowed sources connect
-function isAllowed(p, src, dst){
-  const selected = p.denyAll ||
-    (dst==="backend" && (p.fb || p.ob)) ||
-    (dst==="database" && p.bd);
-  if(!selected) return true;
-  if(dst==="backend" && p.fb && src==="frontend") return true;
-  if(dst==="backend" && p.ob && src==="outsider") return true;
-  if(dst==="database" && p.bd && src==="backend") return true;
-  return false;
-}
+const REPLY = {
+  backend: "BACKEND: request received",
+  database: "DATABASE: request received",
+  frontend: "FRONTEND: request received"
+};
 
-const REPLY = {backend:"BACKEND: request received", database:"DATABASE: request received", frontend:"FRONTEND: request received"};
-
-function podName(src){
-  return src==="frontend" ? "deploy/frontend" : (src==="backend" ? "backend-test" : src);
-}
-function cmd(src,dst){
-  if(src==="outsider") return `$ kubectl exec -n other-ns outsider -- curl -m 5 -s http://${dst}.${NS}`;
-  return `$ kubectl exec ${podName(src)} -- curl -m 5 -s http://${dst}`;
-}
-function outputFor(p,src,dst){
-  return isAllowed(p,src,dst)
-    ? REPLY[dst]
-    : "command terminated with exit code 28\nBLOCKED";
-}
-
-const PAIRS = [["frontend","backend"],["frontend","database"],["backend","database"],
-               ["test-client","backend"],["test-client","database"],["outsider","backend"]];
-
-function resultsText(p, pairs=PAIRS){
-  let t = "=== RESULTS ===\n";
-  pairs.forEach(([s,d])=>{
-    t += `${s} -> ${d}:\n${outputFor(p,s,d)}\n`;
-  });
-  return t.trimEnd();
-}
-
-function policiesText(p){
-  const rows=[];
-  if(p.bd) rows.push(["allow-backend-to-database","app=database"]);
-  if(p.fb) rows.push(["allow-frontend-to-backend","app=backend"]);
-  if(p.ob) rows.push(["allow-other-namespace-to-backend","app=backend"]);
-  if(p.denyAll) rows.push(["default-deny-ingress","<none>"]);
-  if(!rows.length) return `$ kubectl get networkpolicy\nNo resources found in ${NS} namespace.`;
-  const w = Math.max(...rows.map(r=>r[0].length))+3;
-  let t = `$ kubectl get networkpolicy\n${"NAME".padEnd(w)}POD-SELECTOR\n`;
-  rows.forEach(r=>{ t += r[0].padEnd(w)+r[1]+"\n"; });
-  return t.trimEnd();
-}
-
-function podsText(){
-  return `$ kubectl get pods --show-labels
-NAME                        READY  STATUS   LABELS
-backend-77fbc647f7-p554q    1/1    Running  app=backend
-backend-test                1/1    Running  app=backend
-database-6b55fc59bb-kvn8x   1/1    Running  app=database
-frontend-5667bf75d5-5vwv8   1/1    Running  app=frontend
-test-client                 1/1    Running  app=test-client
-outsider (ns: other-ns)     1/1    Running  (no app label)`;
-}
-
-function describeText(p){
-  if(!p.fb && !p.bd && !p.denyAll && !p.ob) return "Tick a policy first to describe it.";
-  let t="";
-  if(p.denyAll) t+=`$ kubectl describe networkpolicy default-deny-ingress
-Name:         default-deny-ingress
-Namespace:    ${NS}
-Spec:
-  PodSelector:     <none> (Allowing the specific traffic to all pods in this namespace)
-  Allowing ingress traffic:
-    <none> (Selected pods are isolated for ingress connectivity)
-  Policy Types: Ingress
-
-`;
-  if(p.fb) t+=`$ kubectl describe networkpolicy allow-frontend-to-backend
-Name:         allow-frontend-to-backend
-Namespace:    ${NS}
-Spec:
-  PodSelector:     app=backend
-  Allowing ingress traffic:
-    To Port: 5678/TCP
-    From:
-      PodSelector: app=frontend
-  Not affecting egress traffic
-  Policy Types: Ingress
-
-`;
-  if(p.bd) t+=`$ kubectl describe networkpolicy allow-backend-to-database
-Name:         allow-backend-to-database
-Namespace:    ${NS}
-Spec:
-  PodSelector:     app=database
-  Allowing ingress traffic:
-    To Port: 5678/TCP
-    From:
-      PodSelector: app=backend
-  Not affecting egress traffic
-  Policy Types: Ingress
-
-`;
-  if(p.ob) t+=`$ kubectl describe networkpolicy allow-other-namespace-to-backend
-Name:         allow-other-namespace-to-backend
-Namespace:    ${NS}
-Spec:
-  PodSelector:     app=backend
-  Allowing ingress traffic:
-    To Port: 5678/TCP
-    From:
-      NamespaceSelector: kubernetes.io/metadata.name=other-ns
-  Not affecting egress traffic
-  Policy Types: Ingress
-
-`;
-  return t.trimEnd();
-}
-
-// ---------- UI ----------
 let view = "tests";
 let customText = null;
 
-function render(){
-  const p = pol();
-  const t = $("terminal");
-  if(customText!==null){ t.textContent = customText; return; }
-  if(view==="tests") t.textContent = resultsText(p);
-  if(view==="policies") t.textContent = policiesText(p);
-  if(view==="pods") t.textContent = podsText();
-  if(view==="describe") t.textContent = describeText(p);
+function pol() {
+  return {
+    denyAll: $("denyAll").checked,
+    fb: $("fb").checked,
+    bd: $("bd").checked,
+    ob: $("ob").checked
+  };
 }
 
-function setView(v){
-  view=v; customText=null;
-  document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("active", b.dataset.view===v));
-  render();
+function isAllowed(p, src, dst) {
+  const isolated =
+    p.denyAll ||
+    (dst === "backend" && (p.fb || p.ob)) ||
+    (dst === "database" && p.bd);
+
+  if (!isolated) return true;
+
+  if (dst === "backend" && p.fb && src === "frontend") return true;
+  if (dst === "backend" && p.ob && src === "outsider") return true;
+  if (dst === "database" && p.bd && src === "backend") return true;
+
+  return false;
 }
 
-function table(p){
-  let html="<tr><th>Test</th><th>Result</th></tr>";
-  PAIRS.forEach(([s,d])=>{
-    const ok=isAllowed(p,s,d);
-    html+=`<tr><td>${s} → ${d}</td><td class="${ok?"ok":"no"}">${ok?"✅ Allowed":"❌ Blocked"}</td></tr>`;
+function podName(src) {
+  if (src === "frontend") return "deploy/frontend";
+  if (src === "backend") return "backend-test";
+  return src;
+}
+
+function cmd(src, dst) {
+  if (src === "outsider") {
+    return `$ kubectl exec -n other-ns outsider -- curl -m 5 -s http://${dst}.${NS}`;
+  }
+
+  return `$ kubectl exec ${podName(src)} -- curl -m 5 -s http://${dst}`;
+}
+
+function outputFor(p, src, dst) {
+  return isAllowed(p, src, dst)
+    ? (REPLY[dst] || `${dst.toUpperCase()}: request received`)
+    : "command terminated with exit code 28\nBLOCKED: connection timed out";
+}
+
+function resultsText(p, pairs = PAIRS) {
+  let text = "$ kubectl get networkpolicy\n";
+  text += "=== SIMULATED CONNECTION TESTS ===\n\n";
+
+  pairs.forEach(([src, dst]) => {
+    text += `${cmd(src, dst)}\n`;
+    text += `${src} -> ${dst}: `;
+    text += isAllowed(p, src, dst) ? "ALLOWED\n" : "BLOCKED\n";
+    text += outputFor(p, src, dst) + "\n\n";
   });
-  $("table").innerHTML=html;
+
+  return text.trim();
 }
 
-function highlight(src,dst){
-  document.querySelectorAll(".pod").forEach(x=>x.classList.remove("active"));
-  $(src).classList.add("active"); $(dst).classList.add("active");
+function policiesText(p) {
+  const rows = [];
+
+  if (p.denyAll) rows.push(["default-deny-ingress", "<none>"]);
+  if (p.fb) rows.push(["allow-frontend-to-backend", "app=backend"]);
+  if (p.bd) rows.push(["allow-backend-to-database", "app=database"]);
+  if (p.ob) rows.push(["allow-other-namespace-to-backend", "app=backend"]);
+
+  if (!rows.length) {
+    return `$ kubectl get networkpolicy\nNo resources found in ${NS} namespace.`;
+  }
+
+  return "$ kubectl get networkpolicy\n\nNAME\t\t\t\tPOD-SELECTOR\n" +
+    rows.map(([name, selector]) => `${name}\t${selector}`).join("\n");
 }
 
-function runOne(){
-  const p=pol(), s=$("src").value, d=$("dst").value;
-  highlight(s,d);
-  const ok=isAllowed(p,s,d);
-  $("result").className=ok?"ok":"no";
-  $("result").textContent=`${s} → ${d}: ${ok?"✅ ALLOWED":"❌ BLOCKED"}`;
-  document.querySelectorAll(".tab").forEach(b=>b.classList.remove("active"));
-  customText = cmd(s,d)+"\n"+outputFor(p,s,d);
+function podsText() {
+  return `$ kubectl get pods --show-labels
+NAME                         READY  STATUS   LABELS
+backend-test                 1/1    Running  app=backend
+database                     1/1    Running  app=database
+frontend                     1/1    Running  app=frontend
+test-client                  1/1    Running  app=test-client
+outsider (namespace other-ns) 1/1   Running  (no app label)`;
+}
+
+function describeText(p) {
+  if (!p.denyAll && !p.fb && !p.bd && !p.ob) {
+    return "Select at least one policy to see its simulated description.";
+  }
+
+  let text = "";
+
+  if (p.denyAll) {
+    text += `$ kubectl describe networkpolicy default-deny-ingress
+Namespace: ${NS}
+PodSelector: <none>
+Policy Types: Ingress
+
+`;
+  }
+
+  if (p.fb) {
+    text += `$ kubectl describe networkpolicy allow-frontend-to-backend
+Namespace: ${NS}
+PodSelector: app=backend
+Allowed source: app=frontend
+Policy Types: Ingress
+
+`;
+  }
+
+  if (p.bd) {
+    text += `$ kubectl describe networkpolicy allow-backend-to-database
+Namespace: ${NS}
+PodSelector: app=database
+Allowed source: app=backend
+Policy Types: Ingress
+
+`;
+  }
+
+  if (p.ob) {
+    text += `$ kubectl describe networkpolicy allow-other-namespace-to-backend
+Namespace: ${NS}
+PodSelector: app=backend
+Allowed namespace: other-ns
+Policy Types: Ingress
+
+`;
+  }
+
+  return text.trim();
+}
+
+function render() {
+  const terminal = $("terminal");
+  if (!terminal) return;
+
+  if (customText !== null) {
+    terminal.textContent = customText;
+    return;
+  }
+
+  if (view === "tests") terminal.textContent = resultsText(pol());
+  if (view === "policies") terminal.textContent = policiesText(pol());
+  if (view === "pods") terminal.textContent = podsText();
+  if (view === "describe") terminal.textContent = describeText(pol());
+}
+
+function setView(nextView) {
+  view = nextView;
+  customText = null;
+
+  document.querySelectorAll(".tab").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === nextView);
+  });
+
   render();
 }
 
-function runAll(){
-  customText=null; setView("tests"); table(pol());
+function updateTable(p) {
+  const table = $("table");
+  if (!table) return;
+
+  let html = "<tr><th>Test</th><th>Result</th></tr>";
+
+  PAIRS.forEach(([src, dst]) => {
+    const allowed = isAllowed(p, src, dst);
+
+    html += `<tr>
+      <td>${src} → ${dst}</td>
+      <td class="${allowed ? "ok" : "no"}">
+        ${allowed ? "✅ Allowed" : "❌ Blocked"}
+      </td>
+    </tr>`;
+  });
+
+  table.innerHTML = html;
 }
 
-function setPolicies(o){
-  ["denyAll","fb","bd","ob"].forEach(k=>$(k).checked=!!o[k]);
+function highlight(src, dst) {
+  document.querySelectorAll(".pod").forEach((pod) => {
+    pod.classList.remove("active");
+  });
+
+  $(src)?.classList.add("active");
+  $(dst)?.classList.add("active");
 }
 
-["denyAll","fb","bd","ob"].forEach(id=>$(id).addEventListener("change",()=>{ customText=null; render(); table(pol()); }));
-$("testBtn").onclick=runOne;
-$("allBtn").onclick=runAll;
-$("resetBtn").onclick=()=>{ setPolicies({}); $("result").textContent=""; $("table").innerHTML=""; setView("tests"); };
-document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>setView(b.dataset.view));
+function runOne() {
+  const p = pol();
+  const src = $("src").value;
+  const dst = $("dst").value;
+  const allowed = isAllowed(p, src, dst);
 
-// Use cases
-$("uc1").onclick=()=>{
-  setPolicies({denyAll:true,fb:true,bd:true,ob:false});
-  const p=pol();
-  customText = "USE CASE: Restrict traffic between namespaces\n\n" +
-    cmd("outsider","backend")+"\n"+outputFor(p,"outsider","backend")+"\n\n"+
-    cmd("outsider","database")+"\n"+outputFor(p,"outsider","database")+
-    "\n\nThe pod in other-ns is blocked because default-deny covers the namespace\nand no rule allows other-ns.";
-  document.querySelectorAll(".tab").forEach(b=>b.classList.remove("active"));
-  table(p); render(); $("terminal").scrollIntoView({behavior:"smooth",block:"center"});
-};
-$("uc2").onclick=()=>{
-  setPolicies({denyAll:true,fb:true,bd:true,ob:false});
-  customText=null; setView("tests"); table(pol());
-  $("terminal").scrollIntoView({behavior:"smooth",block:"center"});
-};
+  highlight(src, dst);
 
-// Bottlenecks
-$("bn1").onclick=()=>{
-  customText=`BOTTLENECK: Policies silently block traffic with confusing symptoms
+  $("result").className = allowed ? "ok" : "no";
+  $("result").textContent =
+    `${src} → ${dst}: ${allowed ? "✅ ALLOWED" : "❌ BLOCKED"}`;
 
-A blocked request does not say "denied". It just hangs, then times out.
-Read the curl exit code:
+  customText = `${cmd(src, dst)}\n${outputFor(p, src, dst)}`;
 
-  Exit code 28  ->  timeout: dropped by NetworkPolicy
-  Exit code 7   ->  failed to connect (pod not ready), NOT a policy block
-  Exit code 6   ->  DNS / Service name problem
-  localhost:8080 refused -> kubectl has no cluster
+  document.querySelectorAll(".tab").forEach((button) => {
+    button.classList.remove("active");
+  });
 
-Other traps:
-  - Policies match the container port (5678), not the Service port (80)
-  - Labels must match exactly (app=backend)
+  render();
+  updateTable(p);
+}
 
-Diagnose with:
-  kubectl get networkpolicy
-  kubectl get pods --show-labels
-  kubectl describe networkpolicy <name>`;
-  document.querySelectorAll(".tab").forEach(b=>b.classList.remove("active"));
-  render(); $("terminal").scrollIntoView({behavior:"smooth",block:"center"});
-};
-$("bn2").onclick=()=>{
-  setPolicies({denyAll:true});
-  const p=pol();
-  customText="BOTTLENECK: Default-deny adoption breaks existing services\n\n"+
-    "Only default-deny-ingress is applied. No allow rules yet:\n\n"+
-    resultsText(p,[["frontend","backend"],["backend","database"]])+
-    "\n\nThe app is now broken. Fix: add allow-frontend-to-backend and\nallow-backend-to-database, then test again.\nSafe order: baseline -> default-deny -> allow rules one by one -> test each.";
-  document.querySelectorAll(".tab").forEach(b=>b.classList.remove("active"));
-  table(p); render(); $("terminal").scrollIntoView({behavior:"smooth",block:"center"});
-};
+function runAll() {
+  customText = null;
+  setView("tests");
+  updateTable(pol());
+}
 
+function setPolicies(options = {}) {
+  ["denyAll", "fb", "bd", "ob"].forEach((key) => {
+    $(key).checked = !!options[key];
+  });
+}
+
+["denyAll", "fb", "bd", "ob"].forEach((id) => {
+  $(id).addEventListener("change", () => {
+    customText = null;
+    render();
+    updateTable(pol());
+  });
+});
+
+$("testBtn").addEventListener("click", runOne);
+$("allBtn").addEventListener("click", runAll);
+
+$("resetBtn").addEventListener("click", () => {
+  setPolicies();
+  $("result").textContent = "";
+  customText = null;
+  updateTable(pol());
+  setView("tests");
+});
+
+document.querySelectorAll(".tab").forEach((button) => {
+  button.addEventListener("click", () => setView(button.dataset.view));
+});
+
+$("uc1").addEventListener("click", () => {
+  setPolicies({ denyAll: true, fb: true, bd: true });
+  customText =
+    "USE CASE: Restrict traffic between namespaces\n\n" +
+    `${cmd("outsider", "backend")}\n` +
+    `${outputFor(pol(), "outsider", "backend")}\n\n` +
+    "The outsider is blocked because no selected policy allows it.";
+
+  updateTable(pol());
+  render();
+});
+
+$("uc2").addEventListener("click", () => {
+  setPolicies({ denyAll: true, fb: true, bd: true });
+  customText =
+    "USE CASE: Workload isolation\n\n" +
+    `${cmd("frontend", "database")}\n` +
+    `${outputFor(pol(), "frontend", "database")}\n\n` +
+    `${cmd("backend", "database")}\n` +
+    `${outputFor(pol(), "backend", "database")}`;
+
+  updateTable(pol());
+  render();
+});
+
+$("bn1").addEventListener("click", () => {
+  customText = `BOTTLENECK: Diagnosing blocked traffic
+
+Exit code 28: request timed out
+Exit code 7: connection failed
+Exit code 6: DNS lookup failed
+
+Diagnostic commands:
+kubectl get networkpolicy
+kubectl get pods --show-labels
+kubectl describe networkpolicy <name>
+
+These are simulated examples, not live cluster results.`;
+
+  render();
+});
+
+$("bn2").addEventListener("click", () => {
+  setPolicies({ denyAll: true });
+  customText =
+    "BOTTLENECK: Default-deny adoption\n\n" +
+    resultsText(pol(), [
+      ["frontend", "backend"],
+      ["backend", "database"]
+    ]) +
+    "\n\nAdd the required allow policies and rerun the tests.";
+
+  updateTable(pol());
+  render();
+});
+
+// Show initial simulated results when the page opens.
+updateTable(pol());
 render();
